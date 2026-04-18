@@ -60,15 +60,41 @@ export function handleApiError(error: unknown): string {
   if (error instanceof AxiosError) {
     if (error.response) {
       const status = error.response.status;
-      const detail =
-        (error.response.data as { error?: string })?.error ?? "";
+      const body = (error.response.data ?? {}) as {
+        error?: string;
+        error_tag?: string;
+        error_code?: number;
+      };
+      const detail = body.error ?? "";
+
+      // Pro-tier gate detection.
+      // We don't have a published list of error_tag values for "needs Pro", so
+      // we use a heuristic: HTTP 402 (Payment Required), or 403 with a tag/message
+      // that mentions premium/pro/plan/upgrade. Always include the raw API detail
+      // as a fallback so no info is lost if the heuristic misses.
+      if (isProRequiredError(status, body)) {
+        const raw = body.error_tag
+          ? `${body.error_tag}${detail ? ` — ${detail}` : ""}`
+          : detail || error.message;
+        return (
+          `Error ${status}: This Todoist feature requires a Pro subscription. ` +
+          `Upgrade at https://todoist.com/pricing or use a Pro account.` +
+          (raw ? ` (API said: ${raw})` : "")
+        );
+      }
+
       switch (status) {
         case 400:
           return `Error 400: Bad request. ${detail} — Check your input parameters.`;
         case 401:
           return "Error 401: Unauthorized. Your TODOIST_API_TOKEN is invalid or expired.";
+        case 402:
+          // Caught above by isProRequiredError, but kept as a safety net.
+          return `Error 402: Payment required. ${detail}`;
         case 403:
-          return "Error 403: Forbidden. You don't have permission to access this resource.";
+          return `Error 403: Forbidden. You don't have permission to access this resource.${
+            detail ? ` (${detail})` : ""
+          }`;
         case 404:
           return `Error 404: Resource not found. Check that the ID is correct. ${detail}`;
         case 429:
@@ -89,4 +115,18 @@ export function handleApiError(error: unknown): string {
     }
   }
   return `Error: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+// ─── Pro-tier detection ──────────────────────────────────────────────────────
+
+const PRO_KEYWORDS = ["premium", "pro_", "pro-", "upgrade", "paid", "subscription"];
+
+function isProRequiredError(
+  status: number,
+  body: { error?: string; error_tag?: string }
+): boolean {
+  if (status === 402) return true;
+  if (status !== 403) return false;
+  const haystack = `${body.error_tag ?? ""} ${body.error ?? ""}`.toLowerCase();
+  return PRO_KEYWORDS.some((kw) => haystack.includes(kw));
 }
