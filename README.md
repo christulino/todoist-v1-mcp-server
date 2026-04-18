@@ -13,7 +13,7 @@ This server:
 - **Never enforces strict output schemas** on API responses — Todoist can add new fields freely without breaking anything
 - Zero SDK wrapper dependency — direct HTTP calls via axios, so there's no intermediary library drifting from the API
 
-## Tools (20 total)
+## Tools (31 total)
 
 ### Tasks
 | Tool | Description |
@@ -50,6 +50,31 @@ This server:
 | `todoist_create_label` | Create a label |
 | `todoist_update_label` | Update a label |
 | `todoist_delete_label` | Delete a label |
+
+### Comments
+| Tool | Description |
+|------|-------------|
+| `todoist_get_comments` | List comments on a task or project (paginated) |
+| `todoist_get_comment` | Get a single comment by ID |
+| `todoist_create_comment` | Add a comment to a task or project (Markdown supported) |
+| `todoist_update_comment` | Edit an existing comment's content |
+| `todoist_delete_comment` | Permanently delete a comment |
+
+### Completed tasks (Pro)
+| Tool | Description |
+|------|-------------|
+| `todoist_get_completed_tasks` | Query completed tasks by completion date (≤3mo) or due date (≤6wk). Pro-only. |
+
+### Reminders (Pro)
+| Tool | Description |
+|------|-------------|
+| `todoist_get_reminders` | List reminders, optionally filtered by `task_id`. Pro-only. |
+| `todoist_get_reminder` | Get a single reminder by ID. Pro-only. |
+| `todoist_create_reminder` | Create a relative (`minute_offset` before due) or absolute reminder. Pro-only. |
+| `todoist_update_reminder` | Update reminder timing or notification service. Pro-only. |
+| `todoist_delete_reminder` | Permanently delete a reminder. Pro-only. |
+
+> **Pro-tier handling:** Reminders and completed-task queries require a Todoist Pro subscription. If the API returns a Pro-gate error (HTTP 402, or 403 with a `premium`/`pro`/`upgrade`/`paid`/`subscription` keyword), the server returns a clean message explaining the feature requires Pro rather than leaking the raw API error.
 
 ## Setup
 
@@ -143,7 +168,7 @@ npm start     # run compiled server
 
 ## Testing
 
-The test suite hits the live Todoist API and runs a full CRUD cycle across tasks, projects, sections, and labels. All test data is prefixed with `[mcp-test]` and cleaned up automatically.
+The test suite hits the live Todoist API and runs a full CRUD cycle across tasks, projects, sections, labels, comments, and reminders, plus a read-only smoke test for completed-task querying. Reminders and completed-task tests detect Pro-tier gating (HTTP 402/403) and report cleanly when the account is on the Free tier. All test data is prefixed with `[mcp-test]` and cleaned up automatically.
 
 ```bash
 TODOIST_API_TOKEN=your_token npm test

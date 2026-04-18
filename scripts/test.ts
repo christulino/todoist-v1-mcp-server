@@ -146,6 +146,31 @@ async function cleanup(client: AxiosInstance) {
     // ignore
   }
 
+  // Orphaned reminders — Pro-only. Deleting the host task SHOULD cascade-delete
+  // its reminders, but a mid-run crash between "create reminder" and "delete host
+  // task" can leave dangling reminders for tasks that still exist. We can only
+  // scan reminders globally and delete anything whose host task name matches the
+  // marker. Non-Pro accounts 402/403 here — that's fine, we just skip.
+  try {
+    const reminders = await client.get("/reminders", { params: { limit: 200 } });
+    const reminderList = Array.isArray(reminders.data)
+      ? reminders.data
+      : (reminders.data.results ?? reminders.data.items ?? []);
+    for (const r of reminderList as { id: string; task_id?: string }[]) {
+      if (!r.task_id) continue;
+      try {
+        const task = await client.get(`/tasks/${r.task_id}`);
+        if (task.data?.content?.includes(TEST_MARKER)) {
+          await client.delete(`/reminders/${r.id}`).catch(() => null);
+        }
+      } catch {
+        // host task may already be gone — skip this reminder
+      }
+    }
+  } catch {
+    // Free tier or endpoint unavailable — silent skip
+  }
+
   ok("Leftover test data removed");
 }
 
@@ -416,8 +441,235 @@ async function testSectionCRUD(client: AxiosInstance) {
   });
 }
 
+async function testCommentCRUD(client: AxiosInstance) {
+  section("6. Comments — full CRUD cycle");
+
+  let taskId = "";
+  let commentId = "";
+
+  // Host task for the comment (we'll delete both at the end)
+  await run("Create host task for comment test", async () => {
+    const res = await client.post("/tasks", {
+      content: `${TEST_MARKER} Comment host task ${Date.now()}`,
+    });
+    assert(res.status === 200, "Status 200");
+    taskId = res.data.id;
+    ok("Host task created", `ID: ${taskId}`);
+  });
+
+  if (!taskId) {
+    fail("Remaining comment tests skipped", new Error("No host task"));
+    return;
+  }
+
+  await run("Create comment on task", async () => {
+    const res = await client.post("/comments", {
+      task_id: taskId,
+      content: `${TEST_MARKER} Hello from the test suite`,
+    });
+    assert(res.status === 200, "Status 200");
+    assert(!!res.data.id, "Comment has ID");
+    commentId = res.data.id;
+    ok("Comment created", `ID: ${commentId}`);
+  });
+
+  if (commentId) {
+    await run("List comments by task_id (includes new)", async () => {
+      const res = await client.get("/comments", { params: { task_id: taskId } });
+      const comments = Array.isArray(res.data)
+        ? res.data
+        : (res.data.results ?? res.data.items ?? []);
+      const found = (comments as { id: string }[]).some((c) => c.id === commentId);
+      assert(found, "New comment appears in list");
+      ok(`Listed ${comments.length} comment(s)`);
+    });
+
+    await run("Reject list with neither task_id nor project_id", async () => {
+      try {
+        await client.get("/comments");
+        // API may return 400 or return an empty/error result — either is acceptable;
+        // this test mainly documents that agents must pass one of the two.
+        ok("API tolerated empty filter (will error at MCP layer)");
+      } catch (err) {
+        if (err instanceof AxiosError && err.response?.status && err.response.status >= 400) {
+          ok(`API rejected with ${err.response.status}`);
+        } else {
+          throw err;
+        }
+      }
+    });
+
+    await run("Get single comment by ID", async () => {
+      const res = await client.get(`/comments/${commentId}`);
+      assert(res.status === 200, "Status 200");
+      assert(res.data.id === commentId, "ID matches");
+      assert(res.data.content.includes(TEST_MARKER), "Content roundtrips");
+      ok("Comment retrieved");
+    });
+
+    await run("Update comment content", async () => {
+      const newContent = `${TEST_MARKER} Updated ${Date.now()}`;
+      const res = await client.post(`/comments/${commentId}`, { content: newContent });
+      assert(res.status === 200, "Status 200");
+      assert(res.data.content === newContent, "Content updated");
+      ok("Comment updated");
+    });
+
+    await run("Delete comment", async () => {
+      const res = await client.delete(`/comments/${commentId}`);
+      assert(res.status === 204, "Status 204");
+      ok("Comment deleted");
+    });
+  }
+
+  // Cleanup host task
+  await client.delete(`/tasks/${taskId}`).catch(() => null);
+  ok("Host task cleaned up");
+}
+
+async function testCompletedTasks(client: AxiosInstance) {
+  section("7. Completed tasks — read-only smoke test (Pro feature)");
+
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const since = sevenDaysAgo.toISOString();
+  const until = now.toISOString();
+
+  await run("GET /tasks/completed/by_completion_date (last 7 days)", async () => {
+    try {
+      const res = await client.get("/tasks/completed/by_completion_date", {
+        params: { since, until, limit: 50 },
+      });
+      assert(res.status === 200, "Status 200");
+      const tasks = Array.isArray(res.data)
+        ? res.data
+        : (res.data.items ?? res.data.results ?? []);
+      assert(Array.isArray(tasks), "items is an array");
+      ok(`Returned ${tasks.length} completed task(s)`);
+    } catch (err) {
+      if (err instanceof AxiosError && (err.response?.status === 402 || err.response?.status === 403)) {
+        // Free tier — confirm the failure mode is detectable so the MCP wrapper can format it.
+        ok(`Pro-gate detected: HTTP ${err.response.status} (this account is on Free tier)`);
+      } else {
+        throw err;
+      }
+    }
+  });
+
+  await run("GET /tasks/completed/by_due_date (last 7 days)", async () => {
+    try {
+      const res = await client.get("/tasks/completed/by_due_date", {
+        params: { since, until, limit: 50 },
+      });
+      assert(res.status === 200, "Status 200");
+      ok(`by_due_date endpoint reachable`);
+    } catch (err) {
+      if (err instanceof AxiosError && (err.response?.status === 402 || err.response?.status === 403)) {
+        ok(`Pro-gate detected: HTTP ${err.response.status}`);
+      } else {
+        throw err;
+      }
+    }
+  });
+}
+
+async function testReminderCRUD(client: AxiosInstance) {
+  section("8. Reminders — full CRUD cycle (Pro feature)");
+
+  let taskId = "";
+  let reminderId = "";
+
+  // Host task with a due datetime so a 'relative' reminder has something to anchor to.
+  await run("Create host task (with due datetime) for reminder test", async () => {
+    const res = await client.post("/tasks", {
+      content: `${TEST_MARKER} Reminder host task ${Date.now()}`,
+      due_string: "tomorrow at 3pm",
+    });
+    assert(res.status === 200, "Status 200");
+    assert(!!res.data.due, "Host task has a due date");
+    taskId = res.data.id;
+    ok("Host task created", `ID: ${taskId}`);
+  });
+
+  if (!taskId) {
+    fail("Remaining reminder tests skipped", new Error("No host task"));
+    return;
+  }
+
+  // Create — relative reminder, 30 min before due
+  let proGated = false;
+  await run("Create relative reminder (30m before due)", async () => {
+    try {
+      const res = await client.post("/reminders", {
+        task_id: taskId,
+        reminder_type: "relative",
+        minute_offset: 30,
+      });
+      assert(res.status === 200, "Status 200");
+      assert(!!res.data.id, "Reminder has ID");
+      reminderId = res.data.id;
+      ok("Reminder created", `ID: ${reminderId}`);
+    } catch (err) {
+      if (
+        err instanceof AxiosError &&
+        (err.response?.status === 402 || err.response?.status === 403)
+      ) {
+        proGated = true;
+        ok(`Pro-gate detected: HTTP ${err.response.status} (account on Free tier — remaining reminder tests will be skipped)`);
+      } else {
+        throw err;
+      }
+    }
+  });
+
+  if (proGated) {
+    // Clean up the host task — we're done.
+    await client.delete(`/tasks/${taskId}`).catch(() => null);
+    ok("Host task cleaned up");
+    return;
+  }
+
+  if (reminderId) {
+    await run("List reminders by task_id (includes new)", async () => {
+      const res = await client.get("/reminders", { params: { task_id: taskId } });
+      const reminders = Array.isArray(res.data)
+        ? res.data
+        : (res.data.results ?? res.data.items ?? []);
+      const found = (reminders as { id: string }[]).some((r) => r.id === reminderId);
+      assert(found, "New reminder appears in list");
+      ok(`Listed ${reminders.length} reminder(s) for task`);
+    });
+
+    await run("Get single reminder by ID", async () => {
+      const res = await client.get(`/reminders/${reminderId}`);
+      assert(res.status === 200, "Status 200");
+      assert(res.data.id === reminderId, "ID matches");
+      ok("Reminder retrieved");
+    });
+
+    await run("Update reminder minute_offset → 60", async () => {
+      const res = await client.post(`/reminders/${reminderId}`, {
+        minute_offset: 60,
+      });
+      assert(res.status === 200, "Status 200");
+      assert(res.data.minute_offset === 60, "minute_offset updated");
+      ok("Offset updated to 60m");
+    });
+
+    await run("Delete reminder", async () => {
+      const res = await client.delete(`/reminders/${reminderId}`);
+      assert(res.status === 204, "Status 204");
+      ok("Reminder deleted");
+    });
+  }
+
+  // Cleanup host task
+  await client.delete(`/tasks/${taskId}`).catch(() => null);
+  ok("Host task cleaned up");
+}
+
 async function testPagination(client: AxiosInstance) {
-  section("6. Task list — filters and pagination");
+  section("9. Task list — filters and pagination");
 
   await run("Get tasks with filter: today | overdue", async () => {
     const res = await client.get("/tasks", { params: { filter: "today | overdue", limit: 10 } });
@@ -437,7 +689,7 @@ async function testPagination(client: AxiosInstance) {
 }
 
 async function testErrorHandling(client: AxiosInstance) {
-  section("7. Error handling — bad IDs and inputs");
+  section("10. Error handling — bad IDs and inputs");
 
   await run("GET nonexistent task → 4xx error", async () => {
     try {
@@ -500,6 +752,9 @@ async function main() {
   await testProjectCRUD(client);
   await testLabelCRUD(client);
   await testSectionCRUD(client);
+  await testCommentCRUD(client);
+  await testCompletedTasks(client);
+  await testReminderCRUD(client);
   await testPagination(client);
   await testErrorHandling(client);
 

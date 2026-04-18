@@ -31,6 +31,9 @@ import { registerTaskTools } from "./tools/tasks.js";
 import { registerProjectTools } from "./tools/projects.js";
 import { registerSectionTools } from "./tools/sections.js";
 import { registerLabelTools } from "./tools/labels.js";
+import { registerCommentTools } from "./tools/comments.js";
+import { registerCompletedTaskTools } from "./tools/completed.js";
+import { registerReminderTools } from "./tools/reminders.js";
 
 // ─── Startup validation ───────────────────────────────────────────────────────
 
@@ -59,13 +62,16 @@ registerTaskTools(server);
 registerProjectTools(server);
 registerSectionTools(server);
 registerLabelTools(server);
+registerCommentTools(server);
+registerCompletedTaskTools(server);
+registerReminderTools(server);
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("todoist-v1-mcp-server running (stdio). 20 tools registered.");
+  console.error("todoist-v1-mcp-server running (stdio). 31 tools registered.");
 }
 
 main().catch((error: unknown) => {
